@@ -211,6 +211,73 @@ kcptun的下载速度. 速度在2M左右。
 
 [icmptunnel](https://github.com/DhavalKapil/icmptunnel)
 
+### 详细讲解
+
+**背景**
+
+**普通**上网是这样的：
+
+![normal]
+
+其中第一条竖线左边是本机host。第二条竖线右边是server。中间是路由器，防火墙等。`http/tcp`表示，host和server之间的流量是tcp类型，但协议是http。
+
+缺点：有的网站上不了，比如google。
+
+####shadowsocks####
+
+为了解决有的网站上不了，于是有了**shadowsocks**，shadowsocks的工作流程大概是这样的:
+
+![shadowsocks]
+
+其中 ss_protocol/tcp表示，流浪是tcp类型，但协议是shadowsocks协议，有可能加密过，也有可能没有加密过，且shadowsocks中data字段是上层协议(这里是http)的所有数据。这里host和server之间的流量仍然是tcp。
+
+缺点：出海带宽不稳定，tcp容易丢包，速度慢。
+
+####kcptun####
+
+为了解决tcp速度慢，于是有了**kcptun**，kcptun运行着kcp协议。kcp是一个可靠且快速的协议。kcptun的流程大概如下：
+
+![kcptun]
+
+缺点：运营商会屏蔽udp大流量。
+
+####rsock####
+
+为了解决udp容易被封，于是有了**rsock**，rsock的工作流程是这样的:
+
+![rsock]
+
+下面，详细介绍rsock的工作流程和目的：
+
+1. rsock_server 监听一个端口（实际是监听一个指定范围的端口，比如10000 到 10010)
+2. rsock_client 正常connect到rsock_server，建立了一个正常的tcp连接(TCP三步握手完成)。建立这个tcp连接的目的后面再讲。
+3. 浏览器把流量传给sslocal，sslocal根据协议加密后发送给kcptun_client，kcptun_client把数据用kcp协议处理过后再加密，然后发给rsock_client
+4. rsock_client把收到的流量通过fake_tcp(伪tcp连接）发送给rsock_server。
+
+**注意**： 这里发数据是通过libnet(一个跨平台的原始套接字库)，收数据是通过libpcap(跨平台的抓包库)，数据的收发并没有通过第2步建立的socket。
+
+问题1：什么是faketcp？
+
+答：faketcp不存在于操作系统中，只是rsock构造的一条虚拟连接。fake_tcp的中的任意一个数据包，是通过libnet手动构造的(手动指定的srcip:srcport:dstip:dstport)，它的格式仍然是tcp的(仅仅是seq，ack不对，其他字段都正确）。
+
+问题2：为什么fake_tcp能通信？
+
+答：
+
+1. 发数据，并不是通过第2步建立的socket(没有send(socket, buf, len))，而是通过libnet手动构造的一个假tcp数据包，该数据包的所有字段都是手动输入的。其中srcip:srcport:dstip:dstport和第2步建立的tcp的对应数据一样。
+1.  在路由器路由器看来，一个faketcp是数据包是一个正常的tcp包。因为路由器本身无法区分一个包是否是正常的，它只能根据本身的nat表来判断，由srcip:srcport:dstip:dstport构成的这条连接是打开的还是关闭的，如果是打开的，就放转发该数据包(fake_tcp数据包)；如果是关闭的，就丢弃该数据。由于在第2步走完了tcp三步握手，所以nat中有该连接对应的表项，所以nat判断该连接是正常的，可以转发数据。
+2. 在操作系统看来，一个faketcp数据包是无效的数据包。因为该数据包的srcip:srcport:dstip:dstport和第2步建立的正常tcp连接是一样的，所以判断该数据包是发送到某个端口的数据包，但里面的seq和内核中记载的seq不匹配，所以会丢弃该数据包。根据tcp协议，系统还会向peer端发送一个ack报文，表示内核中第2步建立的tcp连接所期待的下一个包文。系统不会向peer发送RST，整个连接就不会终端
+3. 收数据，是通过libpcap。libpcap能先于内核抓取到数据，抓取到数据后再发送给上层应用（这里是kcptun）
+
+
+问题3：不预先建立一条tcp连接可以吗？
+
+答：可以。通常情况下，对于peer发过来的faketcp数据包srcip:srcport:dstip:dstport构成的tcp连接，由于内核中没有该连接的记录，根据tcp协议会发送一个RST报文给peer。NAT收到该报文，发现了RST标记，就会释放掉该连接。造成该链接无法再使用。**解决办法**是，屏蔽内核固定端口的数据。linux上通过iptable，macOS上通过bpf. 内核接收不到数据，自然也不会发送rst。但libpcap始终能抓取到包。所以始终能收取到数据。
+
+
+问题4：rsock数据传输是可靠的吗？
+
+答：rsock数据传输是不可靠的，且没有流控。rsock仅仅是把kcptun发送过来的流量转发到rsock peer端。但kcptun的传输是可靠和快速的，所以在shadowsocks/browser看来数据也是可靠和快速的。
 
 ### TODO
    
@@ -239,4 +306,9 @@ kcptun的下载速度. 速度在2M左右。
 或者扫描二维码
 
 ![](img/ethdonation.jpeg)
+
+[normal]: img/normal.png
+[shadowsocks]: img/shadowsocks.png
+[kcptun]: img/kcptun.png
+[rsock]: img/rsock.png
 
